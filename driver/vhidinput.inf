@@ -1,0 +1,63 @@
+;
+; vhidinput.inf - root-enumerated virtual HID keyboard/mouse driver.
+;
+; Installed on the current machine only. The driver is test-signed; it will
+; not load with Driver Signature Enforcement on.
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %ProviderString%
+DriverVer   = 01/01/2026,1.0.0.9
+CatalogFile = vhidinput.cat
+PnpLockdown = 1
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+vhidinput.sys = 1
+
+[DestinationDirs]
+DefaultDestDir      = 12
+Vhidinput.CopyFiles = 12
+
+[Manufacturer]
+%ProviderString% = VhidInputModels, NTamd64.10.0...22000
+
+[VhidInputModels.NTamd64.10.0...22000]
+%DeviceDesc% = VhidInput.Install, Root\VhidInput
+
+[VhidInput.Install]
+CopyFiles = Vhidinput.CopyFiles
+
+[VhidInput.Install.HW]
+AddReg = VhidInput.AddReg
+
+[VhidInput.AddReg]
+; Vhf.sys must be attached below this FDO; VhfCreate fails with
+; STATUS_INVALID_DEVICE_REQUEST (0xC0000010) if it is not in the stack.
+HKR,, "LowerFilters", 0x00010000, "vhf"
+; The INF installs and starts the service; the child virtual HID device is
+; enumerated by VHF (Vhf.sys), not by this INF.
+
+[VhidInput.Install.Services]
+AddService = vhidinput, 0x00000002, VhidInput.Service
+
+[Vhidinput.CopyFiles]
+vhidinput.sys
+
+[VhidInput.Service]
+DisplayName    = %ServiceName%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %12%\vhidinput.sys
+
+[Strings]
+ProviderString = "GreenTide Labs"
+DiskName       = "VhidInput Install Disk"
+ServiceName    = "VhidInput Virtual HID Keyboard/Mouse"
+DeviceDesc     = "VhidInput Virtual Keyboard and Mouse"

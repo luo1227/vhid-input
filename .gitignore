@@ -1,0 +1,42 @@
+# ---- 构建产物 ----
+# Rust: cargo 的输出目录，体积大且可完全重建
+user/target/
+
+# 驱动: mk.bat 的输出（bin\ 下的 .sys/.pdb/.lib/.exp）与安装包目录
+/bin/
+driver/obj/
+driver/bin/
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+
+# ---- 安装相关生成文件 ----
+# 安装脚本在 bin\pkg 下生成 inf/cat/sys 副本，都被 /bin/ 覆盖
+install/install.log
+
+# ---- 测试与诊断的临时产物 ----
+*.log
+*.dump
+*.dmp
+*.etl
+*.blg
+*.txt
+!Cargo.lock
+
+# ---- 编辑器与系统 ----
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+Thumbs.db
+desktop.ini
+
+# ---- 备份文件 ----
+# 由 git 来承担历史，不再保留手工 .bak 副本
+*.bak
+*.orig
+*.rej
