@@ -145,36 +145,42 @@ if ($pnputilExit -eq 259) {
 }
 
 Write-Host '[install] creating root-enumerated device'
-# This Windows build has no `pnputil /add-device`, so create the ROOT node
-# with devcon from the Windows Kits.
-$devcon = $(
-    Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Tools' -Recurse -Filter devcon.exe |
-        Where-Object { $_.FullName -match 'x64' } |
-        Sort-Object FullName -Descending |
-        Select-Object -First 1
-).FullName
-if (-not $devcon) { throw 'devcon.exe not found in the Windows Kits.' }
+# This Windows build has no `pnputil /add-device`, so an absent ROOT node has
+# to be created with devcon from the Windows Kits.
 # Re-running the installer must update the existing node, not create another:
 # every devcon "install" of the same instance id spawns a fresh ROOT\SYSTEM\NNNN
 # node, and two live instances fight over the \\.\VhidInput DOS name (the second
-# fails with STATUS_INVALID_DEVICE_REQUEST). Update in place when one is present.
+# fails with STATUS_INVALID_DEVICE_REQUEST).
+$installedVersion = (Get-Content (Join-Path $pkg 'vhidinput.inf') |
+    Select-String -Pattern '^DriverVer\s*=\s*[^,]+,\s*(\S+)' |
+    Select-Object -First 1).Matches.Groups[1].Value
+
 $existing = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
     Where-Object { $_.InstanceId -like 'ROOT\*' -and $_.FriendlyName -like '*VhidInput*' } |
     Select-Object -First 1
-if ($existing) {
-    Write-Host "[install] updating existing device $($existing.InstanceId)"
-    & $devcon update (Join-Path $pkg 'vhidinput.inf') $existing.InstanceId 2>&1 | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        # devcon update fails when INF DriverVer matches what is already
-        # installed, so a rebuilt .sys with the same version is never copied
-        # into System32. Say so loudly: the device keeps running the old image
-        # and any code change appears to have no effect.
-        Write-Warning ('devcon update failed. If vhidinput.c changed but the INF DriverVer did not, ' +
-                       'bump DriverVer (and VHIDINPUT_VERSION_NUMBER) and re-run; PnP skips updates ' +
-                       'that carry the same version. A reboot is required to load a replaced .sys.')
-    }
-} else {
+
+if (-not $existing) {
+    $devcon = $(
+        Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Tools' -Recurse -Filter devcon.exe |
+            Where-Object { $_.FullName -match 'x64' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+    ).FullName
+    if (-not $devcon) { throw 'devcon.exe not found in the Windows Kits.' }
+    Write-Host '[install] no device yet; creating ROOT\VhidInput'
     & $devcon install (Join-Path $pkg 'vhidinput.inf') 'Root\VhidInput' 2>&1 | Out-Host
+} else {
+    # pnputil /add-driver /install above already binds the newest package to the
+    # existing node. Do NOT follow it with `devcon update`: on an up-to-date
+    # device it fails with a bare "devcon.exe failed." and no usable reason, and
+    # the only thing it would have done is re-apply what PnP just did.
+    $bound = (Get-PnpDeviceProperty -InstanceId $existing.InstanceId `
+        -KeyName 'DEVPKEY_Device_DriverVersion' -ErrorAction SilentlyContinue).Data
+    Write-Host "[install] device $($existing.InstanceId) bound to driver version $bound (package $installedVersion)"
+    if ($bound -ne $installedVersion) {
+        Write-Warning ('The device is still on a different driver version than this package. ' +
+                       'PnP only accepts a different version, so bump DriverVer in the INF and re-run.')
+    }
 }
 
 # Report which image is actually staged in System32 versus what was built, so

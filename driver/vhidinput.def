@@ -1,3 +1,2 @@
-LIBRARY vhidinput
 EXPORTS
     DriverEntry

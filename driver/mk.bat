@@ -16,7 +16,11 @@ if not exist "%OUT%" mkdir "%OUT%"
 
 cd /d "%~dp0"
 
-cl /nologo /c /W4 /O2 /GS /kernel /Z7 /D_AMD64_ /D_WIN64 /DAMD64 /D_UNICODE /DUNICODE /DNTDDI_VERSION=0x0A00000C /D_WIN32_WINNT=0x0A00 /DKMDF_VERSION_MAJOR=1 /DKMDF_VERSION_MINOR=31 /D_KERNEL_MODE=1 /Gs /I"%WDKINC%\km" /I"%WDKINC%\km\crt" /I"%WDKINC%\shared" /I"%WDFINC%" /Fo:obj\ vhidinput.c vhidinput_report.c
+rem cl writes the .obj files into obj\, which it will not create itself; a
+rem clean checkout (obj/ is gitignored) failed to build without this line.
+if not exist obj mkdir obj
+
+cl /nologo /c /W4 /O2 /GS /kernel /Z7 /D_AMD64_ /D_WIN64 /DAMD64 /D_UNICODE /DUNICODE /DNTDDI_VERSION=0x0A00000C /D_WIN32_WINNT=0x0A00 /DKMDF_VERSION_MAJOR=1 /DKMDF_VERSION_MINOR=31 /Gs /I"%WDKINC%\km" /I"%WDKINC%\km\crt" /I"%WDKINC%\shared" /I"%WDFINC%" /Fo:obj\ vhidinput.c vhidinput_report.c
 if errorlevel 1 goto :fail
 
 rem /DEBUG keeps a private PDB next to the .sys so kd can map offsets

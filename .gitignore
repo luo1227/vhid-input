@@ -30,6 +30,7 @@ install/install.log
 .vs/
 .vscode/
 .idea/
+.openidea/
 *.user
 *.suo
 Thumbs.db
