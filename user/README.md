@@ -19,9 +19,15 @@ install\install.ps1                  # 管理员权限
 
 ```toml
 [dependencies]
-vhid-input = { git = "https://github.com/OWNER/vhid-input", branch = "master" }
-# 或本地路径
-# vhid-input = { path = "../vhid-input/user" }
+vhid-input = { git = "https://github.com/luo1227/vhid-input", branch = "master" }
+```
+
+crate 位于仓库子目录 `user/`，仓库根有 workspace 清单，所以上面的写法即可
+解析到它。或本地路径：
+
+```toml
+[dependencies]
+vhid-input = { path = "../vhid-input/user" }
 ```
 
 ## 用法

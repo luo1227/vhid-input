@@ -1,5 +1,7 @@
 # ---- 构建产物 ----
-# Rust: cargo 的输出目录，体积大且可完全重建
+# Rust: cargo 的输出目录，体积大且可完全重建。workspace 模式下产物落在
+# 仓库根的 target/；单 crate 构建时也可能落在 user/target/。
+/target/
 user/target/
 
 # 驱动: mk.bat 的输出（bin\ 下的 .sys/.pdb/.lib/.exp）与安装包目录

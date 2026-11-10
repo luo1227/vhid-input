@@ -1,0 +1,7 @@
+# Workspace 根清单。让 `vhid-input = { git = "..." }` 这类 git 依赖能找到
+# user/ 子目录里的 crate：Cargo 在仓库根查找 Cargo.toml，从这里的 workspace
+# 成员解析出 vhid-input 包。驱动（driver/）与安装脚本不参与 Cargo 构建。
+[workspace]
+resolver = "2"
+members = ["user"]
+default-members = ["user"]
