@@ -127,16 +127,20 @@ if ($LASTEXITCODE -ne 0) { throw "signtool failed ($LASTEXITCODE)" }
 & $signtool verify /pa /v $cat 2>&1 | Select-Object -Last 3 | Out-Host
 
 # ---- 3. install via pnputil ----
-# Exit code 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) is success: the package was
-# imported and the device updated, Windows just wants a reboot to swap the
-# in-use .sys. Treating it as failure aborted the script with the package
-# already staged but the device not migrated.
+# Exit codes that mean the package landed: 0 (imported), 3010 (imported, wants
+# a reboot to swap the in-use .sys), and 259 (ERROR_NO_MORE_ITEMS: the package
+# is already present at this DriverVer, because INF version numbers drive PnP
+# and an unchanged DriverVer is silently "no update available"). Treating 259
+# as failure aborted the script here, leaving the device disabled and the old
+# .sys loaded -- which is exactly how a fresh build appeared to do nothing.
 Write-Host '[install] adding driver package'
 & pnputil.exe /add-driver (Join-Path $pkg 'vhidinput.inf') /install 2>&1 | Out-Host
-if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) {
-    throw "pnputil /add-driver failed ($LASTEXITCODE)"
-}
-if ($LASTEXITCODE -eq 3010) {
+$pnputilExit = $LASTEXITCODE
+if ($pnputilExit -eq 259) {
+    Write-Host '[install] package already at this DriverVer; device update below proceeds.'
+} elseif ($pnputilExit -ne 0 -and $pnputilExit -ne 3010) {
+    throw "pnputil /add-driver failed ($pnputilExit)"
+} elseif ($pnputilExit -eq 3010) {
     Write-Host '[install] pnputil asked for a reboot to finish the driver swap.'
 }
 
@@ -160,8 +164,31 @@ $existing = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
 if ($existing) {
     Write-Host "[install] updating existing device $($existing.InstanceId)"
     & $devcon update (Join-Path $pkg 'vhidinput.inf') $existing.InstanceId 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        # devcon update fails when INF DriverVer matches what is already
+        # installed, so a rebuilt .sys with the same version is never copied
+        # into System32. Say so loudly: the device keeps running the old image
+        # and any code change appears to have no effect.
+        Write-Warning ('devcon update failed. If vhidinput.c changed but the INF DriverVer did not, ' +
+                       'bump DriverVer (and VHIDINPUT_VERSION_NUMBER) and re-run; PnP skips updates ' +
+                       'that carry the same version. A reboot is required to load a replaced .sys.')
+    }
 } else {
     & $devcon install (Join-Path $pkg 'vhidinput.inf') 'Root\VhidInput' 2>&1 | Out-Host
+}
+
+# Report which image is actually staged in System32 versus what was built, so
+# the next step (usually a reboot) is chosen with the real state in hand.
+$sysInstalled = 'C:\Windows\System32\drivers\vhidinput.sys'
+if ((Test-Path $sysInstalled) -and (Test-Path $sys)) {
+    $a = (Get-FileHash $sys -Algorithm SHA256).Hash
+    $b = (Get-FileHash $sysInstalled -Algorithm SHA256).Hash
+    if ($a -eq $b) {
+        Write-Host '[install] System32 image matches the build. The running copy only changes after a reboot.'
+    } else {
+        Write-Warning ('System32 holds a different image than this build. PnP did not swap it; ' +
+                       'bump the INF DriverVer or copy it manually once the device is stopped.')
+    }
 }
 
 Start-Sleep -Seconds 2

@@ -206,9 +206,14 @@ VhidInputPumpLocked(
         // Grab the diagnostic payload before the submit: a ready callback
         // would let VHF read the same buffer asynchronously, and reading back
         // afterwards would race with it.
-        diagData = (LONG)(slot->Data[1] | (slot->Data[2] << 8) |
-                          ((ULONG)slot->Data[3] << 16) |
-                          ((ULONG)slot->Data[4] << 24));
+        //
+        // Pack from Data[0], the same place LastSubmitLen's "+ 1" counts from:
+        // that byte is the report ID and the payload follows it. Starting at
+        // Data[1] dropped the first payload byte, so a one-byte media report
+        // packed up as four zero bytes and LastSubmitData always read 0.
+        diagData = (LONG)(slot->Data[0] | (slot->Data[1] << 8) |
+                          ((ULONG)slot->Data[2] << 16) |
+                          ((ULONG)slot->Data[3] << 24));
 
         status = VhfReadReportSubmit(Context->VhfHandle, &slot->Packet);
         // Record what crossed the boundary: id, full buffer length (ID
