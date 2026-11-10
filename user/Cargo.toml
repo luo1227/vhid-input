@@ -2,8 +2,16 @@
 name = "vhid-input"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.74"
 description = "Absolute/relative mouse, wheel, keyboard and 5-button mouse injection over the vhidinput KMDF driver"
 license = "MIT OR Apache-2.0"
+readme = "README.md"
+# 推到远程仓库后改成本项目的真实地址，git 依赖与 crates.io 都靠它。
+repository = "https://github.com/OWNER/vhid-input"
+keywords = ["mouse", "keyboard", "input", "hid", "windows"]
+categories = ["os::windows-apis", "api-bindings", "hardware-support"]
+# 本 crate 位于仓库子目录 user/，打包只带源码与示例，不带构建产物。
+include = ["src/**", "examples/**", "Cargo.toml", "README.md", "LICENSE-*"]
 
 [dependencies]
 windows-sys = { version = "0.60", features = [

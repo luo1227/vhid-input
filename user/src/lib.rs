@@ -1,15 +1,52 @@
 //! 用户态接口：通过 `\\.\VhidInput` 向 vhidinput KMDF 驱动注入键盘/鼠标报告。
 //!
-//! 支持：
-//! * 绝对移动 `move_to(x, y)`（像素坐标，自动归一化到 0..32767）
-//! * 相对移动 `move_rel(dx, dy)`
-//! * 滚轮 `wheel(delta)`
-//! * 键盘 `key_down` / `key_up` / `press`（HID Usage Code）
-//! * 5 键鼠标：左、右、中、侧 1、侧 2
-//! * 媒体键 `media_press`（音量、静音、上下曲、播放/暂停）
+//! # 前提
 //!
-//! 归一化：HID 绝对鼠标的 0..32767 映射到整个虚拟桌面，而多显示器下虚拟
-//! 桌面可能从负坐标开始。因此 `move_to` 接收的是虚拟桌面坐标（左上角为
+//! 必须先在本机安装 `vhidinput.sys` 驱动并让 `ROOT\VhidInput` 设备处于
+//! Running 状态（见仓库 `install/install.ps1`）。驱动需要测试签名，仅适用于
+//! 已开启 `bcdedit /set testsigning on` 的机器。设备不存在时 [`VhidInput::open`]
+//! 返回 [`Error::Open`]。
+//!
+//! # 两种用法
+//!
+//! 实例式——自己管理句柄，适合一个组件独占输入：
+//!
+//! ```no_run
+//! use vhid_input::{VhidInput, MouseButton};
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut v = VhidInput::open()?;
+//! v.move_to(100, 200)?;
+//! v.click()?;
+//! v.mouse_press(MouseButton::Right)?;
+//! # Ok(()) }
+//! ```
+//!
+//! 全局单例——进程内共享一个设备句柄，免去 `open()`，适合散落各处的调用点：
+//!
+//! ```no_run
+//! use vhid_input::{self as vhid, MouseButton};
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! vhid::click_at(100, 200, MouseButton::Left)?;
+//! vhid::key_text("Hello, world")?;
+//! # Ok(()) }
+//! ```
+//!
+//! # 线程安全
+//!
+//! [`VhidInput`] 内部持有设备句柄与按键/按钮状态，**不是** `Sync`，也不能
+//! 跨线程共享引用。要并发注入，有两种办法：
+//!
+//! * 每线程各自 [`VhidInput::open`] 一份（驱动端支持多个句柄）；
+//! * 共用下面的全局单例自由函数，它们内部是 `Mutex<VhidInput>`，任意线程
+//!   可调，代价是串行化。
+//!
+//! 全局单例的 [`VhidInput`] 永不 `drop`，所以进程退出时不会自动释放按键；
+//! 需要时显式调用 [`release_all`]。
+//!
+//! # 归一化
+//!
+//! HID 绝对鼠标的 0..32767 映射到整个虚拟桌面，而多显示器下虚拟桌面可能从
+//! 负坐标开始。因此 `move_to` 接收的是虚拟桌面坐标（左上角为
 //! `virtual_rect()` 的原点），而不是主显示器坐标。
 
 #![allow(non_snake_case)]
@@ -114,11 +151,23 @@ pub enum MouseButton {
     Side2 = 4,
 }
 
+/// HID 键盘页修饰键 usage code（0xE0..0xE7），可直接传给 `key_down`/`chord`。
+pub const MOD_LCTRL: u8 = 0xE0;
+pub const MOD_LSHIFT: u8 = 0xE1;
+pub const MOD_LALT: u8 = 0xE2;
+pub const MOD_LGUI: u8 = 0xE3;
+pub const MOD_RCTRL: u8 = 0xE4;
+pub const MOD_RSHIFT: u8 = 0xE5;
+pub const MOD_RALT: u8 = 0xE6;
+pub const MOD_RGUI: u8 = 0xE7;
+
 #[derive(Debug)]
 pub enum Error {
     Open(std::io::Error),
     Io(std::io::Error),
     InvalidReportId(u8),
+    /// `key_text` 收到无法用 US 键盘布局直接映射的字符（非 ASCII）。
+    UnsupportedChar(char),
 }
 
 impl std::fmt::Display for Error {
@@ -127,6 +176,9 @@ impl std::fmt::Display for Error {
             Error::Open(e) => write!(f, "打开 \\\\.\\VhidInput 失败: {e}"),
             Error::Io(e) => write!(f, "DeviceIoControl 失败: {e}"),
             Error::InvalidReportId(id) => write!(f, "无效的 report id: 0x{id:02x}"),
+            Error::UnsupportedChar(c) => {
+                write!(f, "key_text 不支持字符 {c:?}（U+{:04X}），仅支持 US ASCII", *c as u32)
+            }
         }
     }
 }
@@ -141,6 +193,10 @@ impl From<Error> for std::io::Error {
                 std::io::ErrorKind::InvalidInput,
                 format!("无效的 report id: 0x{id:02x}"),
             ),
+            Error::UnsupportedChar(c) => std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("key_text 不支持字符 {c:?}"),
+            ),
         }
     }
 }
@@ -150,12 +206,18 @@ type Result<T> = std::result::Result<T, Error>;
 /// 打开 VhidInput 设备。
 pub struct VhidInput {
     handle: HANDLE,
-   // 已按下的按钮状态，避免相对鼠标报告反复清零
+    // 已按下的按钮状态，避免相对鼠标报告反复清零
     buttons: u8,
     // 已按下的键盘键（HID Usage Code），最多 6 个
     keys: [u8; 6],
     modifiers: u8,
 }
+
+// HANDLE 是内核对象句柄（一个不透明数值），本身不与某一线程绑定；把它
+// 移交给另一线程并在那里调用 DeviceIoControl 是合法的 Win32 用法。全局
+// 单例需要它 Send 才能放进 static Mutex，这里据此声明。VhidInput 不是
+// Sync——独占状态仍需由调用者或那层 Mutex 串行化。
+unsafe impl Send for VhidInput {}
 
 impl VhidInput {
     /// 打开设备。需要驱动已安装、服务已启动。
@@ -305,6 +367,18 @@ impl VhidInput {
         self.mouse_up(button)
     }
 
+    /// 左键单击。最常见的操作，单列一个简短名字。
+    pub fn click(&mut self) -> Result<()> {
+        self.mouse_press(MouseButton::Left)
+    }
+
+    /// 双击：两次按下/松开，中间间隔 50ms（短于系统默认双击时间）。
+    pub fn double_click(&mut self, button: MouseButton) -> Result<()> {
+        self.mouse_press(button)?;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        self.mouse_press(button)
+    }
+
     fn send_button_report(&mut self) -> Result<()> {
         let mut r = RawReport {
             report_id: REPORT_ID_MOUSE_REL,
@@ -351,6 +425,58 @@ impl VhidInput {
     pub fn press(&mut self, usage: u8) -> Result<()> {
         self.key_down(usage)?;
         self.key_up(usage)
+    }
+
+    /// 按下 `mods` 中的所有键，点一下 `key`，再逆序松开修饰键。
+    ///
+    /// 例如 Ctrl+A：`chord(&[MOD_CTRL], 0x04)`。修饰键使用 HID 键盘页的
+    /// 0xE0..0xE7（见 [`MOD_CTRL`] 等常量）。
+    pub fn chord(&mut self, mods: &[u8], key: u8) -> Result<()> {
+        for m in mods {
+            self.key_down(*m)?;
+        }
+        let pressed = self.press(key);
+        for m in mods.iter().rev() {
+            // 松开修饰键尽力而为，不因第一个错误跳过其余，避免卡键。
+            let _ = self.key_up(*m);
+        }
+        pressed
+    }
+
+    /// 把一段 US ASCII 文本逐字符注入。
+    ///
+    /// 每个字符按 US 键盘布局换算成 HID Usage Code，需要 Shift 的字符自动
+    /// 带 Shift。遇到非 ASCII（多字节、中文等）返回 [`Error::UnsupportedChar`]。
+    /// 调用前需保证目标窗口有焦点。
+    pub fn key_text(&mut self, text: &str) -> Result<()> {
+        for c in text.chars() {
+            let (usage, shift) = char_to_usage(c)
+                .ok_or(Error::UnsupportedChar(c))?;
+            if shift {
+                self.chord(&[MOD_LSHIFT], usage)?;
+            } else {
+                self.press(usage)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 按下左键从 `(from_x, from_y)` 拖到 `(to_x, to_y)` 后松开。
+    ///
+    /// 两个坐标都是虚拟桌面像素坐标（同 [`move_to`](Self::move_to)）。
+    pub fn drag(
+        &mut self,
+        from_x: i32,
+        from_y: i32,
+        to_x: i32,
+        to_y: i32,
+    ) -> Result<()> {
+        self.move_to(from_x, from_y)?;
+        self.mouse_down(MouseButton::Left)?;
+        let moved = self.move_to(to_x, to_y);
+        // 无论移动是否成功都要抬起左键，避免拖拽状态卡住。
+        let up = self.mouse_up(MouseButton::Left);
+        moved.and(up)
     }
 
     fn send_keyboard_report(&self) -> Result<()> {
@@ -454,9 +580,152 @@ pub fn init_dpi_awareness() {
     }
 }
 
-/// 简写：把 `key_down`/`key_up` 的用法固定到 `press`。
-pub fn press_key(v: &mut VhidInput, usage: u8) -> Result<()> {
-    v.press(usage)
+/// 把单个 US ASCII 字符映射到 (HID usage, 是否需要 Shift)。非 ASCII 返回 None。
+///
+/// 只覆盖 US 布局下可直接输入的可打印字符与 `\n`/`\t`/回车/退格。
+fn char_to_usage(c: char) -> Option<(u8, bool)> {
+    Some(match c {
+        // 字母：usage 0x04..0x1D 对应 a..z，大写需 Shift。
+        'a'..='z' => (0x04 + (c as u8 - b'a'), false),
+        'A'..='Z' => (0x04 + (c as u8 - b'A'), true),
+        // 数字一行为 1..9,0 = 0x1E..0x27。
+        '1'..='9' => (0x1E + (c as u8 - b'1'), false),
+        '0' => (0x27, false),
+        '\n' | '\r' => (0x28, false),
+        '\t' => (0x2B, false),
+        ' ' => (0x2C, false),
+        // 符号：值取自 US 布局，第二项为是否 Shift。
+        '-' => (0x2D, false),
+        '=' => (0x2E, false),
+        '[' => (0x2F, false),
+        ']' => (0x30, false),
+        '\\' => (0x31, false),
+        ';' => (0x33, false),
+        '\'' => (0x34, false),
+        '`' => (0x35, false),
+        ',' => (0x36, false),
+        '.' => (0x37, false),
+        '/' => (0x38, false),
+        '_' => (0x2D, true),
+        '+' => (0x2E, true),
+        '{' => (0x2F, true),
+        '}' => (0x30, true),
+        '|' => (0x31, true),
+        ':' => (0x33, true),
+        '"' => (0x34, true),
+        '~' => (0x35, true),
+        '<' => (0x36, true),
+        '>' => (0x37, true),
+        '?' => (0x38, true),
+        '!' => (0x1E, true),
+        '@' => (0x1F, true),
+        '#' => (0x20, true),
+        '$' => (0x21, true),
+        '%' => (0x22, true),
+        '^' => (0x23, true),
+        '&' => (0x24, true),
+        '*' => (0x25, true),
+        '(' => (0x26, true),
+        ')' => (0x27, true),
+        '\u{8}' => (0x2A, false), // 退格
+        _ => return None,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// 全局单例
+// ---------------------------------------------------------------------------
+//
+// 进程内共享一个 VhidInput。自由函数都是 `once()` + 加锁的一行封装，
+// 面向"随手调一下"的场景；需要精细控制句柄生命周期或并发度时，仍应
+// 用 VhidInput 实例 API。
+
+use std::sync::{Mutex, OnceLock};
+
+static GLOBAL: OnceLock<Mutex<VhidInput>> = OnceLock::new();
+
+fn global() -> Result<&'static Mutex<VhidInput>> {
+    if let Some(g) = GLOBAL.get() {
+        return Ok(g);
+    }
+    let v = VhidInput::open()?;
+    // 竞态下另一个线程可能先 set：失败说明已被设置，丢弃本次打开的句柄即可。
+    let _ = GLOBAL.set(Mutex::new(v));
+    Ok(GLOBAL.get().expect("global vhid-input initialized"))
+}
+
+/// 全局单例：把光标移到 `(x, y)` 并左键单击。
+pub fn click_at(x: i32, y: i32, button: MouseButton) -> Result<()> {
+    let m = global()?;
+    let mut v = m.lock().unwrap_or_else(|e| e.into_inner());
+    v.move_to(x, y)?;
+    v.mouse_press(button)
+}
+
+/// 全局单例：绝对移动。
+pub fn move_to(x: i32, y: i32) -> Result<()> {
+    let m = global()?;
+    m.lock().unwrap_or_else(|e| e.into_inner()).move_to(x, y)
+}
+
+/// 全局单例：相对移动。
+pub fn move_rel(dx: i32, dy: i32) -> Result<()> {
+    let m = global()?;
+    m.lock().unwrap_or_else(|e| e.into_inner()).move_rel(dx, dy)
+}
+
+/// 全局单例：滚轮。
+pub fn wheel(delta: i32) -> Result<()> {
+    let m = global()?;
+    m.lock().unwrap_or_else(|e| e.into_inner()).wheel(delta)
+}
+
+/// 全局单例：单击。
+pub fn click(button: MouseButton) -> Result<()> {
+    let m = global()?;
+    m.lock().unwrap_or_else(|e| e.into_inner()).mouse_press(button)
+}
+
+/// 全局单例：按下键（HID Usage Code）。
+pub fn key_down(usage: u8) -> Result<()> {
+    let m = global()?;
+    m.lock().unwrap_or_else(|e| e.into_inner()).key_down(usage)
+}
+
+/// 全局单例：松开键。
+pub fn key_up(usage: u8) -> Result<()> {
+    let m = global()?;
+    m.lock().unwrap_or_else(|e| e.into_inner()).key_up(usage)
+}
+
+/// 全局单例：按下并松开。
+pub fn key(usage: u8) -> Result<()> {
+    let m = global()?;
+    m.lock().unwrap_or_else(|e| e.into_inner()).press(usage)
+}
+
+/// 全局单例：组合键，例如 Ctrl+A = `chord(&[MOD_LCTRL], 0x04)`。
+pub fn chord(mods: &[u8], usage: u8) -> Result<()> {
+    let m = global()?;
+    m.lock().unwrap_or_else(|e| e.into_inner()).chord(mods, usage)
+}
+
+/// 全局单例：按 US ASCII 文本逐字符注入。
+pub fn key_text(text: &str) -> Result<()> {
+    let m = global()?;
+    m.lock().unwrap_or_else(|e| e.into_inner()).key_text(text)
+}
+
+/// 全局单例：媒体键按一下。
+pub fn media_press(key: MediaKey, hold: std::time::Duration) -> Result<()> {
+    let m = global()?;
+    m.lock().unwrap_or_else(|e| e.into_inner()).media_press(key, hold)
+}
+
+/// 全局单例：释放所有按键与按钮。不调用也不会自动释放（单例不 drop）。
+pub fn release_all() -> Result<()> {
+    let m = global()?;
+    m.lock().unwrap_or_else(|e| e.into_inner()).release_all()
 }
 
 // ---------------------------------------------------------------------------
@@ -475,4 +744,56 @@ extern "system" {
         dwFlagsAndAttributes: u32,
         hTemplateFile: HANDLE,
     ) -> HANDLE;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn letters_map_with_case() {
+        assert_eq!(char_to_usage('a'), Some((0x04, false)));
+        assert_eq!(char_to_usage('z'), Some((0x1D, false)));
+        assert_eq!(char_to_usage('A'), Some((0x04, true)));
+        assert_eq!(char_to_usage('Z'), Some((0x1D, true)));
+    }
+
+    #[test]
+    fn digits_map_row() {
+        assert_eq!(char_to_usage('1'), Some((0x1E, false)));
+        assert_eq!(char_to_usage('9'), Some((0x26, false)));
+        assert_eq!(char_to_usage('0'), Some((0x27, false)));
+        // 符号与数字同键，需 Shift。
+        assert_eq!(char_to_usage('!'), Some((0x1E, true)));
+        assert_eq!(char_to_usage(')'), Some((0x27, true)));
+    }
+
+    #[test]
+    fn whitespace_map() {
+        assert_eq!(char_to_usage(' '), Some((0x2C, false)));
+        assert_eq!(char_to_usage('\n'), Some((0x28, false)));
+        assert_eq!(char_to_usage('\t'), Some((0x2B, false)));
+    }
+
+    #[test]
+    fn shifted_symbols() {
+        assert_eq!(char_to_usage('_'), Some((0x2D, true)));
+        assert_eq!(char_to_usage('@'), Some((0x1F, true)));
+        assert_eq!(char_to_usage('?'), Some((0x38, true)));
+    }
+
+    #[test]
+    fn non_ascii_rejected() {
+        assert_eq!(char_to_usage('中'), None);
+        assert_eq!(char_to_usage('é'), None);
+        assert_eq!(char_to_usage('😀'), None);
+    }
+
+    #[test]
+    fn full_ascii_printable_round_trips() {
+        for b in 0x20u8..=0x7E {
+            let c = b as char;
+            assert!(char_to_usage(c).is_some(), "0x{b:02x} {c:?} 未映射");
+        }
+    }
 }
