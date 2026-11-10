@@ -8,10 +8,6 @@ use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     SPDRP_HARDWAREID, SPDRP_MFG,
 };
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
 unsafe fn get_str(h: isize, dev: &SP_DEVINFO_DATA, prop: u32) -> Option<String> {
     let mut buf = [0u8; 1024];
     let mut need = 0u32;

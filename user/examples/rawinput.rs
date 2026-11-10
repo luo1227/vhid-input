@@ -6,6 +6,10 @@
 //!
 //! 用法：rawinput [秒数]，默认 8 秒。期间在另一个窗口注入报告。
 
+// The Win32 structs below mirror the SDK field names verbatim so they can be
+// checked against the headers; renaming them to snake_case would obscure that.
+#![allow(non_snake_case)]
+
 use std::mem::{size_of, zeroed};
 use std::ptr::null_mut;
 use std::time::{Duration, Instant};
@@ -237,10 +241,11 @@ fn main() {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        println!(
-            "done: mouse={} key={}",
-            COUNT_MOUSE, COUNT_KEY
-        );
+        // Read through raw pointers: `static mut` cannot be borrowed directly
+        // under the 2024 edition rules.
+        let mouse = std::ptr::addr_of!(COUNT_MOUSE).read_volatile();
+        let key = std::ptr::addr_of!(COUNT_KEY).read_volatile();
+        println!("done: mouse={mouse} key={key}");
     }
 }
 
